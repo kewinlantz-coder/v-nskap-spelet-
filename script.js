@@ -12,13 +12,20 @@ let questions = [];
 let currentQuestionIndex = 0;
 let votes = {};
 let hasVoted = false;
+let joinRetryInterval = null;
 
-// PeerJS Konfiguration med publika STUN-servrar för stabil anslutning
+// Stabil PeerJS-konfiguration med fallback STUN & TURN servrar
 const peerConfig = {
+  host: '0.peerjs.com',
+  port: 443,
+  path: '/',
+  secure: true,
   config: {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' }
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun2.l.google.com:19302' },
+      { urls: 'stun:stun3.l.google.com:19302' }
     ]
   }
 };
@@ -33,24 +40,39 @@ function showStatus(msg) {
   el.classList.remove('hidden');
 }
 
+function hideStatus() {
+  const el = document.getElementById('status-message');
+  el.classList.add('hidden');
+}
+
+// Helper för ren rums-ID
+function getRoomPeerId(code) {
+  return 'v-nsp-room-' + code;
+}
+
 // 1. Skapa Rum (Host)
 function createRoom() {
   myName = document.getElementById('username').value.trim();
   if (!myName) return showStatus("Vänligen skriv ditt namn först!");
 
+  hideStatus();
   isHost = true;
   roomCode = Math.floor(1000 + Math.random() * 9000).toString();
 
-  // Skapa peer med unikt prefix
-  peer = new Peer('v-nskap-v2-' + roomCode, peerConfig);
+  const customId = getRoomPeerId(roomCode);
+  peer = new Peer(customId, peerConfig);
 
-  peer.on('open', () => {
-    players = [{ id: peer.id, name: myName }];
+  peer.on('open', (id) => {
+    players = [{ id: id, name: myName }];
     showLobby();
   });
 
   peer.on('connection', (conn) => {
-    connections.push(conn);
+    conn.on('open', () => {
+      if (!connections.includes(conn)) {
+        connections.push(conn);
+      }
+    });
 
     conn.on('data', (data) => {
       handleHostMessages(data, conn);
@@ -59,17 +81,18 @@ function createRoom() {
     conn.on('close', () => {
       connections = connections.filter(c => c !== conn);
       players = players.filter(p => p.id !== conn.peer);
-      broadcast({ type: 'SYNC_PLAYERS', players: players.map(p => p.name) });
-      updateLobbyUI(players.map(p => p.name));
+      const playerNames = players.map(p => p.name);
+      broadcast({ type: 'SYNC_PLAYERS', players: playerNames });
+      updateLobbyUI(playerNames);
     });
   });
 
   peer.on('error', (err) => {
-    console.error("PeerJS fel:", err);
+    console.error("PeerJS Host-fel:", err);
     if (err.type === 'unavailable-id') {
-      createRoom(); // Generera ny kod om det krockar
+      createRoom(); // Om koden krockade, försök igen med ny kod
     } else {
-      showStatus("Nätverksfel vid rumsskapande. Försök igen!");
+      showStatus("Nätverksstörning vid rumsskapande. Tryck på knappen igen!");
     }
   });
 }
@@ -80,47 +103,87 @@ function joinRoom() {
   let code = document.getElementById('room-code-input').value.trim().toUpperCase();
 
   if (!myName) return showStatus("Skriv in ditt namn!");
-  if (!code) return showStatus("Skriv in den 4-siffriga rumskoden!");
+  if (!code || code.length !== 4) return showStatus("Skriv in den 4-siffriga rumskoden!");
 
+  hideStatus();
   isHost = false;
   roomCode = code;
+
+  if (peer) peer.destroy();
   peer = new Peer(peerConfig);
 
   peer.on('open', () => {
-    hostConn = peer.connect('v-nskap-v2-' + roomCode);
+    attemptConnection();
+  });
 
-    hostConn.on('open', () => {
-      hostConn.send({ type: 'JOIN', name: myName });
-      showLobby();
-    });
-
-    hostConn.on('data', (data) => {
-      handleClientMessages(data);
-    });
-
-    hostConn.on('error', (err) => {
-      console.error(err);
-      showStatus("Kunde inte hitta rummet. Kontrollera koden!");
-    });
+  peer.on('error', (err) => {
+    console.error("PeerJS Client-fel:", err);
+    showStatus("Kunde inte ansluta. Kontrollera att koden stämmer och försök igen!");
+    if (joinRetryInterval) clearInterval(joinRetryInterval);
   });
 }
 
+function attemptConnection() {
+  const targetPeerId = getRoomPeerId(roomCode);
+  hostConn = peer.connect(targetPeerId, { reliable: true });
+
+  let connected = false;
+
+  hostConn.on('open', () => {
+    connected = true;
+    if (joinRetryInterval) clearInterval(joinRetryInterval);
+    
+    hostConn.send({ type: 'JOIN', name: myName });
+    showLobby();
+  });
+
+  hostConn.on('data', (data) => {
+    handleClientMessages(data);
+  });
+
+  hostConn.on('close', () => {
+    showStatus("Anslutningen till rummet bröts.");
+  });
+
+  // Om anslutningen tar tid, prova igen efter 2 sekunder
+  let attempts = 0;
+  if (joinRetryInterval) clearInterval(joinRetryInterval);
+  joinRetryInterval = setInterval(() => {
+    if (!connected && attempts < 4) {
+      attempts++;
+      hostConn = peer.connect(targetPeerId, { reliable: true });
+    } else {
+      clearInterval(joinRetryInterval);
+      if (!connected) {
+        showStatus("Hittade inte rummet. Se till att Rumsskaparen har sin skärm öppen!");
+      }
+    }
+  }, 2000);
+}
+
 function broadcast(data) {
-  connections.forEach(conn => conn.send(data));
+  connections.forEach(conn => {
+    if (conn.open) {
+      conn.send(data);
+    }
+  });
 }
 
 // Hantera meddelanden hos Host
 function handleHostMessages(data, conn) {
   if (data.type === 'JOIN') {
-    if (!players.some(p => p.name === data.name)) {
+    if (!players.some(p => p.id === conn.peer)) {
       players.push({ id: conn.peer, name: data.name });
     }
     const playerNames = players.map(p => p.name);
+    // Skicka bekräftelse till alla
     broadcast({ type: 'SYNC_PLAYERS', players: playerNames });
     updateLobbyUI(playerNames);
   } 
   else if (data.type === 'SUBMIT_QUESTION') {
-    questions.push(data.question);
+    if (!questions.includes(data.question)) {
+      questions.push(data.question);
+    }
     if (questions.length === players.length) {
       broadcast({ type: 'START_VOTING', questions });
       startVotingPhase(questions);
@@ -139,6 +202,7 @@ function handleHostMessages(data, conn) {
 // Hantera meddelanden hos Klienter
 function handleClientMessages(data) {
   if (data.type === 'SYNC_PLAYERS') {
+    players = data.players.map(name => ({ name }));
     updateLobbyUI(data.players);
   } else if (data.type === 'START_GAME') {
     document.getElementById('lobby-screen').classList.add('hidden');
@@ -154,7 +218,9 @@ function showLobby() {
   document.getElementById('setup-screen').classList.add('hidden');
   document.getElementById('lobby-screen').classList.remove('hidden');
   document.getElementById('display-room-code').innerText = roomCode;
-  updateLobbyUI(isHost ? players.map(p => p.name) : [myName]);
+  
+  const currentNames = players.map(p => typeof p === 'string' ? p : p.name);
+  updateLobbyUI(currentNames.length ? currentNames : [myName]);
 }
 
 function updateLobbyUI(playerNames) {
@@ -216,9 +282,8 @@ function renderVoteQuestion() {
   document.getElementById('vote-progress').innerText = `Fråga ${currentQuestionIndex + 1} av ${questions.length}`;
   document.getElementById('current-question-text').innerText = questions[currentQuestionIndex];
 
-  let playerNames = isHost ? players.map(p => p.name) : document.querySelectorAll('.player-item span');
-  // Hämta spelarnamn från UI om klient
-  let names = isHost ? players.map(p => p.name) : Array.from(document.querySelectorAll('.player-item')).map(el => el.innerText.replace('(Du)', '').trim());
+  let names = Array.from(document.querySelectorAll('.player-item')).map(el => el.innerText.replace('(Du)', '').trim());
+  if (!names.length && isHost) names = players.map(p => p.name);
 
   let container = document.getElementById('vote-options');
   container.innerHTML = names.map(name => `
@@ -261,10 +326,11 @@ function showResults(finalVotes) {
   document.getElementById('vote-screen').classList.add('hidden');
   document.getElementById('result-screen').classList.remove('hidden');
 
-  // Confetti-effekt
   confetti({ particleCount: 120, spread: 80, origin: { y: 0.6 } });
 
-  let names = isHost ? players.map(p => p.name) : Array.from(document.querySelectorAll('.player-item')).map(el => el.innerText.replace('(Du)', '').trim());
+  let names = Array.from(document.querySelectorAll('.player-item')).map(el => el.innerText.replace('(Du)', '').trim());
+  if (!names.length && isHost) names = players.map(p => p.name);
+
   let dataValues = names.map(name => finalVotes[name] || 0);
 
   let ctx = document.getElementById('resultChart').getContext('2d');
