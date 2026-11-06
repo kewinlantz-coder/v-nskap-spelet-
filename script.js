@@ -1,365 +1,225 @@
-let roomCode = '';
-let playerName = '';
+let client = null;
+let myName = "";
+let roomCode = "";
 let isHost = false;
-let votesChartInstance = null;
+let syncInterval = null;
 
-let gameState = {
-    targetPlayers: 3,
-    targetRounds: 3,
-    currentRound: 1,
-    players: [],
-    roundQuestions: [],
-    currentQuestionIndex: 0,
-    currentTurnIndex: 0,
-    votesHistory: [],
-    totalVotesPerPlayer: {}
-};
+let players = [];
+let questions = [];
+let currentQuestionIndex = 0;
+let votes = {};
+let hasVotedCurrentQuestion = false;
 
-let timerInterval;
-let timeLeft = 30;
-
-function showPage(pageId) {
-    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-    document.getElementById(pageId).classList.add('active');
-    lucide.createIcons();
+function toggleModal(show) {
+  document.getElementById('info-modal').classList.toggle('hidden', !show);
 }
 
-function generateRoomCode() {
-    return Math.random().toString(36).substring(2, 8).toUpperCase();
+function initMQTT(code, onConnectCallback) {
+  const clientId = 'v_user_' + Math.random().toString(16).substr(2, 8);
+  client = mqtt.connect('wss://broker.emqx.io:8084/mqtt', { clientId: clientId, keepalive: 30 });
+
+  client.on('connect', () => {
+    client.subscribe(`v-nskap/room/${code}`, { qos: 1 }, (err) => {
+      if (!err) {
+        onConnectCallback();
+      }
+    });
+  });
+
+  client.on('message', (topic, message) => {
+    try {
+      const payload = JSON.parse(message.toString());
+      handleMessage(payload);
+    } catch(e){}
+  });
 }
 
-function syncState() {
-    localStorage.setItem(`room_${roomCode}`, JSON.stringify(gameState));
+function sendMQTT(data) {
+  if (client && client.connected) {
+    client.publish(`v-nskap/room/${roomCode}`, JSON.stringify(data), { qos: 1 });
+  }
 }
 
-function loadState() {
-    const saved = localStorage.getItem(`room_${roomCode}`);
-    if (saved) gameState = JSON.parse(saved);
-}
-
-// 1. SKAPA RUM
 function createRoom() {
-    playerName = document.getElementById('player-name-input').value.trim() || "Spelare 1";
-    gameState.targetPlayers = parseInt(document.getElementById('player-count').value) || 3;
-    gameState.targetRounds = parseInt(document.getElementById('round-count').value) || 3;
-    
-    roomCode = generateRoomCode();
-    isHost = true;
-    gameState.players = [playerName];
-    
-    syncState();
-    enterLobby();
+  myName = document.getElementById('username').value.trim();
+  if (!myName) return alert("Skriv in ditt namn först!");
+
+  isHost = true;
+  roomCode = Math.floor(1000 + Math.random() * 9000).toString();
+
+  initMQTT(roomCode, () => {
+    players = [myName];
+    showLobby();
+  });
 }
 
-// 2. GÅ MED I RUM
 function joinRoom() {
-    playerName = document.getElementById('player-name-input').value.trim() || "Spelare 2";
-    const inputCode = document.getElementById('room-code-input').value.trim().toUpperCase();
-    
-    if (!inputCode) return alert("Skriv in en rumskod!");
-    
-    roomCode = inputCode;
-    loadState();
+  myName = document.getElementById('username').value.trim();
+  let code = document.getElementById('room-code-input').value.trim().toUpperCase();
 
-    if (!gameState.players.includes(playerName)) {
-        gameState.players.push(playerName);
-        syncState();
-    }
+  if (!myName) return alert("Skriv ditt namn!");
+  if (!code) return alert("Skriv in rumskoden!");
 
-    enterLobby();
+  isHost = false;
+  roomCode = code;
+
+  initMQTT(roomCode, () => {
+    showLobby();
+    syncInterval = setInterval(() => {
+      sendMQTT({ type: 'JOIN', name: myName });
+    }, 1000);
+  });
 }
 
-function enterLobby() {
-    document.getElementById('display-room-code').innerText = roomCode;
-    showPage('step-waiting');
-    
+function handleMessage(data) {
+  if (data.type === 'JOIN') {
+    if (isHost) {
+      if (!players.includes(data.name)) {
+        players.push(data.name);
+      }
+      sendMQTT({ type: 'SYNC_PLAYERS', players });
+    }
+  } else if (data.type === 'SYNC_PLAYERS') {
+    if (!isHost && syncInterval) {
+      clearInterval(syncInterval);
+      syncInterval = null;
+    }
+    players = data.players;
     updateLobbyUI();
-    setInterval(() => {
-        loadState();
-        updateLobbyUI();
-    }, 1000);
+  } else if (data.type === 'START_GAME') {
+    document.getElementById('lobby-screen').classList.add('hidden');
+    document.getElementById('question-screen').classList.remove('hidden');
+  } else if (data.type === 'SUBMIT_QUESTION') {
+    if (isHost) {
+      if (!questions.includes(data.question)) {
+        questions.push(data.question);
+      }
+      if (questions.length === players.length) {
+        sendMQTT({ type: 'START_VOTING', questions });
+      }
+    }
+  } else if (data.type === 'START_VOTING') {
+    questions = data.questions;
+    document.getElementById('question-screen').classList.add('hidden');
+    document.getElementById('vote-screen').classList.remove('hidden');
+    renderVoteQuestion();
+  } else if (data.type === 'SUBMIT_VOTE') {
+    if (isHost) {
+      votes[data.target] = (votes[data.target] || 0) + 1;
+      let totalVotes = Object.values(votes).reduce((a, b) => a + b, 0);
+      if (totalVotes >= players.length * questions.length) {
+        sendMQTT({ type: 'SHOW_RESULTS', votes });
+      }
+    }
+  } else if (data.type === 'SHOW_RESULTS') {
+    showResults(data.votes);
+  }
+}
+
+function showLobby() {
+  document.getElementById('setup-screen').classList.add('hidden');
+  document.getElementById('lobby-screen').classList.remove('hidden');
+  document.getElementById('display-room-code').innerText = roomCode;
+  updateLobbyUI();
 }
 
 function updateLobbyUI() {
-    const list = document.getElementById('connected-players-list');
-    list.innerHTML = gameState.players.map(p => `<li><i data-lucide="user-check"></i> ${p}</li>`).join('');
+  document.getElementById('player-count').innerText = players.length;
+  let list = document.getElementById('player-list');
+  list.innerHTML = players.map(p => `
+    <li class="player-item">
+      <span>${p} ${p === myName ? '(Du)' : ''}</span> 
+      <span class="status-dot"></span>
+    </li>
+  `).join('');
 
-    const startBtn = document.getElementById('start-game-btn');
-    if (isHost && gameState.players.length >= 1) {
-        startBtn.classList.remove('hidden');
-    }
+  if (isHost) {
+    document.getElementById('start-game-btn').classList.remove('hidden');
+    document.getElementById('waiting-msg').classList.add('hidden');
+  }
 }
 
-// 3. STARTA FRÅGEFASEN
-function startNewRound() {
-    gameState.currentTurnIndex = 0;
-    gameState.roundQuestions = [];
-    syncState();
-
-    startPlayerTurn();
-}
-
-function startPlayerTurn() {
-    showPage('step-questions');
-    
-    document.getElementById('round-badge').innerText = `Runda ${gameState.currentRound} av ${gameState.targetRounds}`;
-    const currentPlayer = gameState.players[gameState.currentTurnIndex];
-    document.getElementById('current-player-turn').innerText = `${currentPlayer}s tur!`;
-    document.getElementById('q1').value = '';
-
-    timeLeft = 30;
-    document.getElementById('timer').innerHTML = `<i data-lucide="clock"></i> ${timeLeft}s`;
-    lucide.createIcons();
-
-    clearInterval(timerInterval);
-    timerInterval = setInterval(() => {
-        timeLeft--;
-        document.getElementById('timer').innerHTML = `<i data-lucide="clock"></i> ${timeLeft}s`;
-        lucide.createIcons();
-        if (timeLeft <= 0) {
-            clearInterval(timerInterval);
-            submitQuestion();
-        }
-    }, 1000);
+function hostStartGame() {
+  if (players.length < 2) return alert("Vänta på att minst en kompis till ska gå med!");
+  sendMQTT({ type: 'START_GAME' });
 }
 
 function submitQuestion() {
-    clearInterval(timerInterval);
-    const q1 = document.getElementById('q1').value.trim();
-    const author = gameState.players[gameState.currentTurnIndex];
+  let q = document.getElementById('my-question').value.trim();
+  if (!q) return alert("Skriv en fråga!");
+  
+  document.getElementById('question-screen').innerHTML = "<h3 style='text-align:center;'>Frågan skickad! Väntar på de andra... ⏳</h3>";
 
-    if (q1) {
-        gameState.roundQuestions.push({ author: author, question: q1 });
+  if (isHost) {
+    if (!questions.includes(q)) questions.push(q);
+    if (questions.length === players.length) {
+      sendMQTT({ type: 'START_VOTING', questions });
     }
+  } else {
+    sendMQTT({ type: 'SUBMIT_QUESTION', question: q });
+  }
+}
 
-    gameState.currentTurnIndex++;
+function renderVoteQuestion() {
+  hasVotedCurrentQuestion = false;
+  document.getElementById('vote-progress').innerText = `Fråga ${currentQuestionIndex + 1} av ${questions.length}`;
+  document.getElementById('current-question-text').innerText = questions[currentQuestionIndex];
 
-    if (gameState.currentTurnIndex < gameState.players.length) {
-        startPlayerTurn();
-    } else {
-        gameState.roundQuestions.sort(() => Math.random() - 0.5);
-        gameState.currentQuestionIndex = 0;
-        syncState();
-        startVotingPhase();
+  let container = document.getElementById('vote-options');
+  container.innerHTML = players.map(p => `
+    <button class="btn btn-secondary" style="margin-bottom: 10px;" onclick="castVote('${p}')">${p}</button>
+  `).join('');
+}
+
+function castVote(targetName) {
+  if (hasVotedCurrentQuestion) return;
+  hasVotedCurrentQuestion = true;
+
+  if (isHost) {
+    votes[targetName] = (votes[targetName] || 0) + 1;
+  } else {
+    sendMQTT({ type: 'SUBMIT_VOTE', target: targetName });
+  }
+
+  currentQuestionIndex++;
+  if (currentQuestionIndex < questions.length) {
+    renderVoteQuestion();
+  } else {
+    document.getElementById('vote-screen').innerHTML = "<h3 style='text-align:center;'>Väntar på att alla ska rösta klart... 📊</h3>";
+    if (isHost) {
+      let totalVotes = Object.values(votes).reduce((a, b) => a + b, 0);
+      if (totalVotes >= players.length * questions.length) {
+        sendMQTT({ type: 'SHOW_RESULTS', votes });
+      }
     }
+  }
 }
 
-// 4. RÖSTNING
-function startVotingPhase() {
-    showPage('step-voting');
-    const qObj = gameState.roundQuestions[gameState.currentQuestionIndex];
-    document.getElementById('question-display').innerText = `"${qObj.question}"`;
+function showResults(finalVotes) {
+  document.getElementById('vote-screen').classList.add('hidden');
+  document.getElementById('result-screen').classList.remove('hidden');
 
-    const voteGrid = document.getElementById('vote-buttons');
-    voteGrid.innerHTML = '';
+  confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 } });
 
-    gameState.players.forEach((player) => {
-        const btn = document.createElement('button');
-        btn.className = 'btn btn-primary btn-glow';
-        btn.innerText = `Rösta på ${player}`;
-        btn.onclick = () => castVote(player);
-        voteGrid.appendChild(btn);
-    });
-}
+  let labels = players;
+  let dataValues = labels.map(name => finalVotes[name] || 0);
 
-function castVote(votedForPlayer) {
-    const currentQ = gameState.roundQuestions[gameState.currentQuestionIndex];
-
-    let historyEntry = gameState.votesHistory.find(h => h.question === currentQ.question && h.author === currentQ.author);
-    if (!historyEntry) {
-        historyEntry = { author: currentQ.author, question: currentQ.question, votes: [] };
-        gameState.votesHistory.push(historyEntry);
+  let ctx = document.getElementById('resultChart').getContext('2d');
+  new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: labels,
+      datasets: [{
+        label: 'Antal Röster',
+        data: dataValues,
+        backgroundColor: ['#8b5cf6', '#ec4899', '#3b82f6', '#10b981', '#f59e0b']
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: { y: { beginAtZero: true, ticks: { stepSize: 1, color: '#94a3b8' } }, x: { ticks: { color: '#fff' } } }
     }
-    
-    historyEntry.votes.push({ voter: playerName, votedFor: votedForPlayer });
-    gameState.totalVotesPerPlayer[votedForPlayer] = (gameState.totalVotesPerPlayer[votedForPlayer] || 0) + 1;
-
-    syncState();
-    showResults();
-}
-
-// 5. RUNDANS RESULTAT
-function showResults() {
-    showPage('step-results');
-    
-    const currentQ = gameState.roundQuestions[gameState.currentQuestionIndex];
-    document.getElementById('result-question-display').innerText = `"${currentQ.question}"`;
-
-    const historyEntry = gameState.votesHistory.find(h => h.question === currentQ.question && h.author === currentQ.author);
-    const votesList = historyEntry ? historyEntry.votes : [];
-    const totalVotes = votesList.length;
-
-    const container = document.getElementById('results-container');
-    container.innerHTML = '';
-
-    if (typeof confetti === 'function') {
-        confetti({ particleCount: 60, spread: 50, origin: { y: 0.7 } });
-    }
-
-    gameState.players.forEach((player, idx) => {
-        const votes = votesList.filter(v => v.votedFor === player).length;
-        const percent = totalVotes > 0 ? Math.round((votes / totalVotes) * 100) : 0;
-
-        const item = document.createElement('div');
-        item.className = 'result-item';
-        item.innerHTML = `
-            <div class="result-info">
-                <span>${player}</span>
-                <span>${percent}% (${votes} röster)</span>
-            </div>
-            <div class="bar-bg">
-                <div class="bar-fill" id="bar-${idx}"></div>
-            </div>
-        `;
-        container.appendChild(item);
-
-        setTimeout(() => {
-            const bar = document.getElementById(`bar-${idx}`);
-            if (bar) bar.style.width = `${percent}%`;
-        }, 100);
-    });
-}
-
-function nextQuestionOrRound() {
-    gameState.currentQuestionIndex++;
-    
-    if (gameState.currentQuestionIndex < gameState.roundQuestions.length) {
-        startVotingPhase();
-    } else {
-        gameState.currentRound++;
-        if (gameState.currentRound <= gameState.targetRounds) {
-            startNewRound();
-        } else {
-            showFinalLeaderboard();
-        }
-    }
-}
-
-// 6. PRO LEADERBOARD MED PROCENTDIAGRAM
-function showFinalLeaderboard() {
-    showPage('step-final');
-
-    let totalAllVotes = 0;
-    Object.values(gameState.totalVotesPerPlayer).forEach(v => totalAllVotes += v);
-
-    const container = document.getElementById('leaderboard-container');
-    container.innerHTML = '';
-
-    if (typeof confetti === 'function') {
-        confetti({ particleCount: 140, spread: 90, origin: { y: 0.5 } });
-    }
-
-    const sortedPlayers = [...gameState.players].sort((a, b) => {
-        return (gameState.totalVotesPerPlayer[b] || 0) - (gameState.totalVotesPerPlayer[a] || 0);
-    });
-
-    const rankBadges = ['🥇', '🥈', '🥉'];
-
-    sortedPlayers.forEach((player, idx) => {
-        const votes = gameState.totalVotesPerPlayer[player] || 0;
-        const percent = totalAllVotes > 0 ? Math.round((votes / totalAllVotes) * 100) : 0;
-        const rankClass = idx < 3 ? `rank-${idx + 1}` : '';
-        const badgeIcon = rankBadges[idx] || `#${idx + 1}`;
-
-        const item = document.createElement('div');
-        item.className = `lb-card ${rankClass}`;
-        item.innerHTML = `
-            <div class="lb-badge">${badgeIcon}</div>
-            <div class="lb-details">
-                <div class="lb-name">${player}</div>
-                <div class="lb-stats">${votes} av ${totalAllVotes} totala röster</div>
-            </div>
-            <div class="lb-percent">${percent}%</div>
-        `;
-        container.appendChild(item);
-    });
-
-    renderChart(sortedPlayers, totalAllVotes);
-}
-
-function renderChart(sortedPlayers, totalAllVotes) {
-    const ctx = document.getElementById('finalVotesChart').getContext('2d');
-    
-    const labels = sortedPlayers;
-    const dataValues = sortedPlayers.map(p => {
-        const v = gameState.totalVotesPerPlayer[p] || 0;
-        return totalAllVotes > 0 ? Math.round((v / totalAllVotes) * 100) : 0;
-    });
-
-    if (votesChartInstance) {
-        votesChartInstance.destroy();
-    }
-
-    votesChartInstance = new Chart(ctx, {
-        type: 'doughnut',
-        data: {
-            labels: labels,
-            datasets: [{
-                data: dataValues,
-                backgroundColor: [
-                    '#6366f1', '#ec4899', '#10b981', '#f59e0b', '#8b5cf6', '#06b6d4', '#f43f5e'
-                ],
-                borderWidth: 2,
-                borderColor: '#161e31'
-            }]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            plugins: {
-                legend: {
-                    position: 'bottom',
-                    labels: { color: '#f8fafc', font: { family: 'Plus Jakarta Sans', size: 12 } }
-                },
-                tooltip: {
-                    callbacks: {
-                        label: function(context) {
-                            return ` ${context.label}: ${context.raw}% av rösterna`;
-                        }
-                    }
-                }
-            }
-        }
-    });
-}
-
-// 7. REVIEW SKÄRM
-function toggleReviewScreen() {
-    showPage('step-review');
-    const container = document.getElementById('review-list');
-    container.innerHTML = '';
-
-    gameState.votesHistory.forEach((item) => {
-        const card = document.createElement('div');
-        card.className = 'review-card';
-
-        let votesHTML = item.votes.map(v => `
-            <li>
-                <span><strong>${v.voter}</strong></span>
-                <span>röstade på <strong>${v.votedFor}</strong></span>
-            </li>
-        `).join('');
-
-        card.innerHTML = `
-            <div class="review-author">Fråga av: ${item.author}</div>
-            <div class="review-question">"${item.question}"</div>
-            <ul class="review-votes-list">
-                ${votesHTML || '<li>Inga röster registrerade</li>'}
-            </ul>
-        `;
-        container.appendChild(card);
-    });
-}
-
-// 8. POPUP MODAL FÖR INFO (ℹ️-knappen)
-function toggleInfoModal() {
-    const modal = document.getElementById('info-modal');
-    modal.classList.toggle('hidden');
-    lucide.createIcons();
-}
-
-function closeModalOnOverlay(event) {
-    if (event.target.id === 'info-modal') {
-        toggleInfoModal();
-    }
+  });
 }
