@@ -5,45 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Vänskapsspelet Online 🤝</title>
 
+  <!-- CSS Style -->
+  <link rel="stylesheet" href="style.css">
+
+  <!-- Externa bibliotek -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
   <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
-
-  <style>
-    :root {
-      --bg-gradient: linear-gradient(135deg, #0f172a 0%, #1e1b4b 50%, #311042 100%);
-      --glass-bg: rgba(255, 255, 255, 0.08);
-      --glass-border: rgba(255, 255, 255, 0.15);
-      --glass-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
-      --accent-purple: #8b5cf6;
-      --accent-pink: #ec4899;
-      --text-main: #f8fafc;
-      --text-muted: #94a3b8;
-    }
-
-    * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', system-ui, sans-serif; }
-    body { background: var(--bg-gradient); min-height: 100vh; color: var(--text-main); display: flex; justify-content: center; align-items: center; padding: 20px; }
-    .container { width: 100%; max-width: 600px; background: var(--glass-bg); backdrop-filter: blur(16px); border: 1px solid var(--glass-border); box-shadow: var(--glass-shadow); border-radius: 24px; padding: 30px; position: relative; }
-    .header { text-align: center; margin-bottom: 25px; }
-    .header h1 { font-size: 2rem; background: linear-gradient(to right, #a78bfa, #f472b6); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-    .info-btn { position: absolute; top: 25px; right: 25px; background: none; border: none; font-size: 1.5rem; cursor: pointer; color: var(--text-muted); }
-    .card { background: rgba(0, 0, 0, 0.2); border: 1px solid var(--glass-border); border-radius: 16px; padding: 20px; margin-bottom: 20px; }
-    input[type="text"] { width: 100%; padding: 14px; background: rgba(255, 255, 255, 0.05); border: 1px solid var(--glass-border); border-radius: 12px; color: #fff; font-size: 1rem; margin-top: 8px; margin-bottom: 15px; outline: none; }
-    input::placeholder { color: var(--text-muted); }
-    .btn { width: 100%; padding: 14px; background: linear-gradient(135deg, var(--accent-purple), var(--accent-pink)); border: none; border-radius: 12px; color: white; font-weight: bold; font-size: 1rem; cursor: pointer; transition: transform 0.2s; }
-    .btn:active { transform: scale(0.98); }
-    .btn-secondary { background: rgba(255,255,255,0.1); border: 1px solid var(--glass-border); margin-top: 10px; }
-    .hidden { display: none !important; }
-    .badge { display: inline-block; padding: 4px 12px; background: rgba(139, 92, 246, 0.3); border-radius: 20px; font-size: 0.85rem; margin-bottom: 15px; border: 1px solid var(--accent-purple); }
-    .player-list { list-style: none; margin-top: 10px; }
-    .player-item { padding: 10px; background: rgba(255,255,255,0.05); border-radius: 8px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
-    .status-dot { height: 10px; width: 10px; background-color: #22c55e; border-radius: 50%; display: inline-block; }
-    
-    .modal { position: fixed; inset: 0; background: rgba(0,0,0,0.8); backdrop-filter: blur(8px); display: flex; justify-content: center; align-items: center; padding: 20px; z-index: 100; }
-    .modal-content { background: #1e1b4b; border: 1px solid var(--glass-border); padding: 25px; border-radius: 20px; max-width: 450px; width: 100%; }
-    .modal-content h2 { margin-bottom: 15px; color: #a78bfa; }
-    .modal-content p { margin-bottom: 10px; line-height: 1.5; color: var(--text-muted); }
-  </style>
 </head>
 <body>
 
@@ -52,7 +20,7 @@
 
     <div class="header">
       <h1>Vänskapsspelet 🤝</h1>
-      <p style="color: var(--text-muted); font-size: 0.9rem;">Spela live med dina vänner!</p>
+      <p style="color: var(--text-muted); font-size: 0.9rem;">Spela live med dina vänner över internet!</p>
     </div>
 
     <!-- STEG 1: SETUP -->
@@ -90,7 +58,7 @@
     <!-- STEG 3: FRÅGA -->
     <div id="question-screen" class="card hidden">
       <h2>Skriv din fråga ❓</h2>
-      <p style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 15px;">Ställ en rolig fråga om er i gänget!</p>
+      <p style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 15px;">Ställ en rolig fråga om någon i gänget!</p>
       <input type="text" id="my-question" placeholder="Vem i gänget skulle...">
       <button class="btn" onclick="submitQuestion()">Skicka Fråga</button>
     </div>
@@ -125,62 +93,7 @@
     </div>
   </div>
 
-  <script>
-    let client = null;
-    let myName = "";
-    let roomCode = "";
-    let isHost = false;
-    let joinInterval = null;
-    
-    let players = [];
-    let questions = [];
-    let currentQuestionIndex = 0;
-    let votes = {};
-    let hasVotedCurrentQuestion = false;
-
-    function toggleModal(show) {
-      document.getElementById('info-modal').classList.toggle('hidden', !show);
-    }
-
-    function initMQTT(code, onConnectCallback) {
-      // Slumpmässigt ID för varje enhet för att undvika krockar
-      const clientId = 'user_' + Math.random().toString(16).substr(2, 8);
-      client = mqtt.connect('wss://broker.emqx.io:8084/mqtt', { clientId: clientId, keepalive: 60 });
-
-      client.on('connect', () => {
-        client.subscribe(`v-nskap/room/${code}`, { qos: 1 }, (err) => {
-          if (!err) {
-            onConnectCallback();
-          }
-        });
-      });
-
-      client.on('message', (topic, message) => {
-        try {
-          const payload = JSON.parse(message.toString());
-          handleMessage(payload);
-        } catch(e){}
-      });
-    }
-
-    function sendMQTT(data) {
-      if (client && client.connected) {
-        client.publish(`v-nskap/room/${roomCode}`, JSON.stringify(data), { qos: 1 });
-      }
-    }
-
-    function createRoom() {
-      myName = document.getElementById('username').value.trim();
-      if (!myName) return alert("Skriv in ditt namn först!");
-
-      isHost = true;
-      roomCode = Math.floor(1000 + Math.random() * 9000).toString();
-
-      initMQTT(roomCode, () => {
-        players = [myName];
-        showLobby();
-      });
-    }
-
-    function joinRoom() {
-      myName = document.getElementById('username').value
+  <!-- JavaScript Logik -->
+  <script src="script.js"></script>
+</body>
+</html>
