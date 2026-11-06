@@ -14,69 +14,106 @@
 </head>
 <body>
 
+  <div class="background-glow glow-1"></div>
+  <div class="background-glow glow-2"></div>
+
   <div class="container">
-    <button class="info-btn" onclick="toggleModal(true)">ℹ️</button>
+    <button class="info-btn" onclick="toggleModal(true)" title="Regler">ℹ️</button>
 
     <div class="header">
-      <h1>Vänskapsspelet 🤝</h1>
-      <p style="color: var(--text-muted); font-size: 0.9rem;">Spela live med dina vänner över internet!</p>
+      <div class="logo-icon">🤝</div>
+      <h1>Vänskapsspelet</h1>
+      <p class="subtitle">Multiplayer i realtid för dig och vännerna</p>
     </div>
 
     <!-- STEG 1: SETUP -->
     <div id="setup-screen" class="card">
-      <label style="font-weight: 600;">Ditt Namn</label>
-      <input type="text" id="username" placeholder="Skriv ditt namn...">
-
-      <div style="margin-top: 15px;">
-        <button class="btn" onclick="createRoom()">✨ Skapa Nytt Rum</button>
+      <div class="input-group">
+        <label for="username">Ditt Namn</label>
+        <input type="text" id="username" placeholder="t.ex. Alex..." autocomplete="off">
       </div>
 
-      <div style="text-align: center; margin: 15px 0; color: var(--text-muted); font-size: 0.85rem;">— ELLER —</div>
+      <button class="btn btn-primary" onclick="createRoom()">
+        <span>✨ Skapa Nytt Rum</span>
+      </button>
 
-      <div>
-        <label style="font-weight: 600;">Skriv in Rumskod</label>
-        <input type="text" id="room-code-input" placeholder="T.ex. 4921" style="text-transform: uppercase;">
-        <button class="btn btn-secondary" onclick="joinRoom()">🚀 Gå med i Rum</button>
+      <div class="divider">
+        <span>ELLER</span>
       </div>
+
+      <div class="input-group">
+        <label for="room-code-input">Rumskod</label>
+        <input type="text" id="room-code-input" placeholder="T.ex. 4921" maxlength="4" style="text-transform: uppercase;">
+      </div>
+
+      <button class="btn btn-secondary" onclick="joinRoom()">
+        <span>🚀 Gå med i Rum</span>
+      </button>
+
+      <p id="status-message" class="status-message hidden"></p>
     </div>
 
     <!-- STEG 2: LOBBY -->
     <div id="lobby-screen" class="card hidden">
-      <div style="text-align: center;">
-        <span class="badge">Rumskod: <strong id="display-room-code" style="color: #fff; font-size: 1.1rem;">-</strong></span>
-        <p style="color: var(--text-muted); font-size: 0.85rem;">Dela koden med dina kompisar!</p>
+      <div class="room-code-badge-container">
+        <span class="badge">RUMSKOD</span>
+        <div class="code-display" id="display-room-code">----</div>
+        <p class="subtext">Dela denna 4-siffriga kod med dina kompisar!</p>
       </div>
 
-      <h3 style="margin-top: 20px; margin-bottom: 10px;">Spelare i rummet (<span id="player-count">1</span>):</h3>
-      <ul id="player-list" class="player-list"></ul>
+      <div class="player-section">
+        <h3>Spelare anslutna (<span id="player-count">1</span>/3+)</h3>
+        <ul id="player-list" class="player-list"></ul>
+      </div>
 
-      <button id="start-game-btn" class="btn hidden" style="margin-top: 20px;" onclick="hostStartGame()">▶️ Starta Spelet (Host)</button>
-      <p id="waiting-msg" style="text-align: center; color: var(--text-muted); margin-top: 15px;">Väntar på att rumsskaparen ska starta...</p>
+      <button id="start-game-btn" class="btn btn-primary hidden" onclick="hostStartGame()">
+        <span>▶️ Starta Spelet</span>
+      </button>
+      <div id="waiting-msg" class="waiting-box">
+        <div class="spinner"></div>
+        <p>Väntar på att rumsskaparen ska starta spelet...</p>
+      </div>
     </div>
 
     <!-- STEG 3: FRÅGA -->
     <div id="question-screen" class="card hidden">
-      <h2>Skriv din fråga ❓</h2>
-      <p style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 15px;">Ställ en rolig fråga om någon i gänget!</p>
-      <input type="text" id="my-question" placeholder="Vem i gänget skulle...">
-      <button class="btn" onclick="submitQuestion()">Skicka Fråga</button>
+      <div class="step-header">
+        <h2>Skriv en fråga ❓</h2>
+        <p class="subtext">Ställ en rolig eller skämtsam fråga om kompisgänget!</p>
+      </div>
+
+      <div class="input-group">
+        <input type="text" id="my-question" placeholder="t.ex. Vem skulle glömma sin egen födelsedag?">
+      </div>
+
+      <button class="btn btn-primary" onclick="submitQuestion()">
+        <span>Skicka Fråga</span>
+      </button>
     </div>
 
     <!-- STEG 4: RÖSTNING -->
     <div id="vote-screen" class="card hidden">
-      <span class="badge" id="vote-progress">Fråga 1</span>
-      <h2 id="current-question-text" style="margin-bottom: 20px; font-size: 1.3rem;">-</h2>
-      <p style="color: var(--text-muted); margin-bottom: 10px;">Vem passar bäst på påståendet?</p>
-      <div id="vote-options"></div>
+      <span class="badge" id="vote-progress">Fråga 1 av 3</span>
+      <h2 id="current-question-text" class="question-display">-</h2>
+      <p class="subtext">Vem passar bäst in på påståendet?</p>
+      
+      <div id="vote-options" class="vote-grid"></div>
     </div>
 
     <!-- STEG 5: RESULTAT -->
     <div id="result-screen" class="card hidden">
-      <h2>Resultat 🏆</h2>
-      <div style="margin-top: 20px; height: 250px;">
+      <div class="step-header">
+        <h2>Resultat 🏆</h2>
+        <p class="subtext">Här är vem som fick flest röster!</p>
+      </div>
+
+      <div class="chart-container">
         <canvas id="resultChart"></canvas>
       </div>
-      <button class="btn" style="margin-top: 20px;" onclick="location.reload()">🔄 Spela Igen</button>
+
+      <button class="btn btn-primary" style="margin-top: 25px;" onclick="location.reload()">
+        <span>🔄 Spela Igen</span>
+      </button>
     </div>
   </div>
 
@@ -84,10 +121,12 @@
   <div id="info-modal" class="modal hidden">
     <div class="modal-content">
       <h2>Hur man spelar 📖</h2>
-      <p>1. En spelare trycker på <strong>Skapa Nytt Rum</strong> och delar koden.</p>
-      <p>2. Övriga skriver in rumskoden och trycker på <strong>Gå med i Rum</strong>.</p>
-      <p>3. Alla skriver in en valfri fråga.</p>
-      <p>4. Ni röstar anonymt på varandra och ser vem som vinner!</p>
+      <ol class="rules-list">
+        <li>En spelare klickar på <strong>Skapa Nytt Rum</strong> och får en rumskod.</li>
+        <li>De andra skriver in sitt namn samt rumskoden och trycker på <strong>Gå med i Rum</strong>.</li>
+        <li>Alla skriver in en valfri fråga om gänget.</li>
+        <li>Ni röstar anonymt på varandra för varje fråga och ser slutresultatet i diagrammet!</li>
+      </ol>
       <button class="btn btn-secondary" onclick="toggleModal(false)">Stäng</button>
     </div>
   </div>
