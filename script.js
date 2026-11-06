@@ -1,55 +1,54 @@
-let client = null;
+let peer = null;
+let connections = [];
+let hostConn = null;
+
 let myName = "";
 let roomCode = "";
 let isHost = false;
-let syncInterval = null;
 
 let players = [];
 let questions = [];
 let currentQuestionIndex = 0;
 let votes = {};
-let hasVotedCurrentQuestion = false;
+let hasVoted = false;
 
 function toggleModal(show) {
   document.getElementById('info-modal').classList.toggle('hidden', !show);
 }
 
-function initMQTT(code, onConnectCallback) {
-  const clientId = 'v_user_' + Math.random().toString(16).substr(2, 8);
-  client = mqtt.connect('wss://broker.emqx.io:8084/mqtt', { clientId: clientId, keepalive: 30 });
-
-  client.on('connect', () => {
-    client.subscribe(`v-nskap/room/${code}`, { qos: 1 }, (err) => {
-      if (!err) {
-        onConnectCallback();
-      }
-    });
-  });
-
-  client.on('message', (topic, message) => {
-    try {
-      const payload = JSON.parse(message.toString());
-      handleMessage(payload);
-    } catch(e){}
-  });
-}
-
-function sendMQTT(data) {
-  if (client && client.connected) {
-    client.publish(`v-nskap/room/${roomCode}`, JSON.stringify(data), { qos: 1 });
-  }
-}
-
 function createRoom() {
   myName = document.getElementById('username').value.trim();
-  if (!myName) return alert("Skriv in ditt namn först!");
+  if (!myName) return alert("Skriv ditt namn först!");
 
   isHost = true;
   roomCode = Math.floor(1000 + Math.random() * 9000).toString();
 
-  initMQTT(roomCode, () => {
+  // Skapa unikt ID för rummet
+  peer = new Peer('v-nskap-room-' + roomCode);
+
+  peer.on('open', () => {
     players = [myName];
     showLobby();
+  });
+
+  peer.on('connection', (conn) => {
+    connections.push(conn);
+
+    conn.on('data', (data) => {
+      handleHostMessages(data, conn);
+    });
+
+    conn.on('close', () => {
+      connections = connections.filter(c => c !== conn);
+    });
+  });
+
+  peer.on('error', (err) => {
+    if (err.type === 'unavailable-id') {
+      createRoom(); // Om koden krockade, generera ny kod automatiskt
+    } else {
+      alert("Nätverksfel vid rumsskapande. Försök igen!");
+    }
   });
 }
 
@@ -62,55 +61,62 @@ function joinRoom() {
 
   isHost = false;
   roomCode = code;
+  peer = new Peer();
 
-  initMQTT(roomCode, () => {
-    showLobby();
-    syncInterval = setInterval(() => {
-      sendMQTT({ type: 'JOIN', name: myName });
-    }, 1000);
+  peer.on('open', () => {
+    hostConn = peer.connect('v-nskap-room-' + roomCode);
+
+    hostConn.on('open', () => {
+      hostConn.send({ type: 'JOIN', name: myName });
+      showLobby();
+    });
+
+    hostConn.on('data', (data) => {
+      handleClientMessages(data);
+    });
+
+    hostConn.on('error', () => {
+      alert("Hittade inte rummet! Kontrollera att koden stämmer.");
+    });
   });
 }
 
-function handleMessage(data) {
+function broadcast(data) {
+  connections.forEach(conn => conn.send(data));
+}
+
+function handleHostMessages(data, conn) {
   if (data.type === 'JOIN') {
-    if (isHost) {
-      if (!players.includes(data.name)) {
-        players.push(data.name);
-      }
-      sendMQTT({ type: 'SYNC_PLAYERS', players });
+    if (!players.includes(data.name)) {
+      players.push(data.name);
     }
-  } else if (data.type === 'SYNC_PLAYERS') {
-    if (!isHost && syncInterval) {
-      clearInterval(syncInterval);
-      syncInterval = null;
+    broadcast({ type: 'SYNC_PLAYERS', players });
+    updateLobbyUI();
+  } else if (data.type === 'SUBMIT_QUESTION') {
+    questions.push(data.question);
+    if (questions.length === players.length) {
+      broadcast({ type: 'START_VOTING', questions });
+      startVotingPhase(questions);
     }
+  } else if (data.type === 'SUBMIT_VOTE') {
+    votes[data.target] = (votes[data.target] || 0) + 1;
+    let totalVotes = Object.values(votes).reduce((a, b) => a + b, 0);
+    if (totalVotes >= players.length * questions.length) {
+      broadcast({ type: 'SHOW_RESULTS', votes });
+      showResults(votes);
+    }
+  }
+}
+
+function handleClientMessages(data) {
+  if (data.type === 'SYNC_PLAYERS') {
     players = data.players;
     updateLobbyUI();
   } else if (data.type === 'START_GAME') {
     document.getElementById('lobby-screen').classList.add('hidden');
     document.getElementById('question-screen').classList.remove('hidden');
-  } else if (data.type === 'SUBMIT_QUESTION') {
-    if (isHost) {
-      if (!questions.includes(data.question)) {
-        questions.push(data.question);
-      }
-      if (questions.length === players.length) {
-        sendMQTT({ type: 'START_VOTING', questions });
-      }
-    }
   } else if (data.type === 'START_VOTING') {
-    questions = data.questions;
-    document.getElementById('question-screen').classList.add('hidden');
-    document.getElementById('vote-screen').classList.remove('hidden');
-    renderVoteQuestion();
-  } else if (data.type === 'SUBMIT_VOTE') {
-    if (isHost) {
-      votes[data.target] = (votes[data.target] || 0) + 1;
-      let totalVotes = Object.values(votes).reduce((a, b) => a + b, 0);
-      if (totalVotes >= players.length * questions.length) {
-        sendMQTT({ type: 'SHOW_RESULTS', votes });
-      }
-    }
+    startVotingPhase(data.questions);
   } else if (data.type === 'SHOW_RESULTS') {
     showResults(data.votes);
   }
@@ -141,7 +147,9 @@ function updateLobbyUI() {
 
 function hostStartGame() {
   if (players.length < 2) return alert("Vänta på att minst en kompis till ska gå med!");
-  sendMQTT({ type: 'START_GAME' });
+  broadcast({ type: 'START_GAME' });
+  document.getElementById('lobby-screen').classList.add('hidden');
+  document.getElementById('question-screen').classList.remove('hidden');
 }
 
 function submitQuestion() {
@@ -151,17 +159,25 @@ function submitQuestion() {
   document.getElementById('question-screen').innerHTML = "<h3 style='text-align:center;'>Frågan skickad! Väntar på de andra... ⏳</h3>";
 
   if (isHost) {
-    if (!questions.includes(q)) questions.push(q);
+    questions.push(q);
     if (questions.length === players.length) {
-      sendMQTT({ type: 'START_VOTING', questions });
+      broadcast({ type: 'START_VOTING', questions });
+      startVotingPhase(questions);
     }
   } else {
-    sendMQTT({ type: 'SUBMIT_QUESTION', question: q });
+    hostConn.send({ type: 'SUBMIT_QUESTION', question: q });
   }
 }
 
+function startVotingPhase(qs) {
+  questions = qs;
+  document.getElementById('question-screen').classList.add('hidden');
+  document.getElementById('vote-screen').classList.remove('hidden');
+  renderVoteQuestion();
+}
+
 function renderVoteQuestion() {
-  hasVotedCurrentQuestion = false;
+  hasVoted = false;
   document.getElementById('vote-progress').innerText = `Fråga ${currentQuestionIndex + 1} av ${questions.length}`;
   document.getElementById('current-question-text').innerText = questions[currentQuestionIndex];
 
@@ -172,13 +188,13 @@ function renderVoteQuestion() {
 }
 
 function castVote(targetName) {
-  if (hasVotedCurrentQuestion) return;
-  hasVotedCurrentQuestion = true;
+  if (hasVoted) return;
+  hasVoted = true;
 
   if (isHost) {
     votes[targetName] = (votes[targetName] || 0) + 1;
   } else {
-    sendMQTT({ type: 'SUBMIT_VOTE', target: targetName });
+    hostConn.send({ type: 'SUBMIT_VOTE', target: targetName });
   }
 
   currentQuestionIndex++;
@@ -189,7 +205,8 @@ function castVote(targetName) {
     if (isHost) {
       let totalVotes = Object.values(votes).reduce((a, b) => a + b, 0);
       if (totalVotes >= players.length * questions.length) {
-        sendMQTT({ type: 'SHOW_RESULTS', votes });
+        broadcast({ type: 'SHOW_RESULTS', votes });
+        showResults(votes);
       }
     }
   }
